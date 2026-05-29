@@ -91,9 +91,18 @@ export function createMediaUploadRoute(
     }
 
     let file: File | null;
+    // Optional single-segment subfolder under media/ (e.g. "environment" →
+    // media/environment/...). Request-driven, backward compatible: absent =
+    // flat media/. Sanitized to one safe segment so a malicious "folder"
+    // value cannot traverse paths (slashes/dots/.. stripped).
+    let folder = "";
     try {
       const formData = await req.formData();
       file = formData.get("file") as File | null;
+      const rawFolder = formData.get("folder");
+      if (typeof rawFolder === "string") {
+        folder = rawFolder.replace(/[^a-zA-Z0-9_-]/g, "");
+      }
     } catch (err) {
       console.error("[cms-runtime:media] formData", err);
       return NextResponse.json({ ok: false, error: "Invalid form data" }, { status: 400 });
@@ -192,7 +201,8 @@ export function createMediaUploadRoute(
         );
       }
 
-      const pathname = `media/${Date.now()}-${baseName}.${finalExt}`;
+      const prefix = folder ? `media/${folder}/` : "media/";
+      const pathname = `${prefix}${Date.now()}-${baseName}.${finalExt}`;
       const result = await putMedia(pathname, uploadBuffer, finalMime);
       return NextResponse.json({ ok: true, ...result });
     } catch (err) {
