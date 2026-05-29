@@ -1,0 +1,12 @@
+# Copy this to `.npmrc` in EACH consuming client repo (do NOT commit a real token).
+#
+# Maps the @bb scope to GitHub Packages so `npm i @bb/cms-runtime` resolves there
+# instead of the public npm registry.
+@bb:registry=https://npm.pkg.github.com
+
+# Auth. The token needs `read:packages` to install (and `write:packages` to publish).
+# Prefer an env var over a literal token in the file:
+//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
+
+# On Vercel: add GITHUB_PACKAGES_TOKEN as an Environment Variable (all environments)
+# and commit this .npmrc (with the ${...} placeholder, never a literal token).

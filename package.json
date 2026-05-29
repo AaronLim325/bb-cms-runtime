@@ -1,0 +1,59 @@
+{
+  "name": "@bb/cms-runtime",
+  "version": "0.1.0",
+  "description": "Shared CMS save chain + media upload chain for BB Media's Next.js 16 + Vercel Blob client websites. Makes the Full-Route-Cache stale bug and the Blob egress blowout structurally impossible.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": false,
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "@vercel/blob": "^2",
+    "next": "^16",
+    "react": "^19",
+    "sharp": "^0.34"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@vercel/blob": "^2.3.3",
+    "next": "16.1.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "sharp": "^0.34.5",
+    "typescript": "^5.6.0"
+  },
+  "optionalDependencies": {
+    "@playwright/test": "^1.49.0"
+  },
+  "publishConfig": {
+    "//": "Published to GitHub Packages. The CONSUMING repo must add an .npmrc mapping the @bb scope to this registry (see .npmrc.example) and authenticate with a PAT that has write:packages (publish) / read:packages (install). Publishing is intentionally NOT wired here — it needs the org PAT supplied later.",
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aaron-Lim/bb-cms-runtime.git"
+  }
+}
