@@ -49,6 +49,19 @@ export {
   type MediaUploadHandlers,
 } from "./media.js";
 
+// Auth chain (two-tier master + client-hash, signed cookie, lockout). Server-only.
+export {
+  createAuth,
+  type Auth,
+  type CreateAuthOptions,
+  type LoginMode,
+  type VerifyLoginResult,
+  type ChangePasswordResult,
+  type PublicAuthState,
+  type SessionPayload,
+  type AuthState,
+} from "./auth.js";
+
 // Storage boundary (the only @vercel/blob importer)
 export {
   readCollectionRaw,
@@ -57,7 +70,10 @@ export {
   mediaUsageBytes,
   putMedia,
   deleteMedia,
+  readAuthStateRaw,
+  writeAuthStateRaw,
   BLOB_DATA_PREFIX,
   BLOB_MEDIA_PREFIX,
+  BLOB_AUTH_PATH,
   type StoredBlob,
 } from "./storage.js";

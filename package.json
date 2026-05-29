@@ -24,6 +24,11 @@
       "types": "./dist/config.d.ts",
       "import": "./dist/config.js",
       "default": "./dist/config.js"
+    },
+    "./auth": {
+      "types": "./dist/auth.d.ts",
+      "import": "./dist/auth.js",
+      "default": "./dist/auth.js"
     }
   },
   "scripts": {
@@ -59,5 +64,8 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/AaronLim325/bb-cms-runtime.git"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3"
   }
 }
