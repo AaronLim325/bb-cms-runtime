@@ -1,6 +1,6 @@
 {
   "name": "@bb/cms-runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared CMS save chain + media upload chain for BB Media's Next.js 16 + Vercel Blob client websites. Makes the Full-Route-Cache stale bug and the Blob egress blowout structurally impossible.",
   "type": "module",
   "license": "UNLICENSED",

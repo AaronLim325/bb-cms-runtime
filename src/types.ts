@@ -49,3 +49,41 @@ export type CollectionMap = Record<string, CollectionDescriptor>;
 export type WriteResult =
   | { ok: true }
   | { ok: false; error: string };
+
+/**
+ * The canonical shape of one blog article across every BB Media client site.
+ *
+ * A "blog" collection is a plain array of these under `data/blog.json`. `slug`
+ * is the stable identity (the URL segment + the upsert key used by
+ * {@link "./blog.js".publishArticle}). `body` is Markdown; each site renders it
+ * however it likes. `coverImage`, when present, is an already-uploaded media
+ * path (e.g. "/media/…") or a value a `<CmsImage>` can take as `src` — it is
+ * NEVER a free-typed remote URL field (IR-26: images are real uploads).
+ */
+export interface BlogPost {
+  /** Human title, shown as the H1 and in listings. */
+  title: string;
+  /** Stable URL segment + upsert identity, e.g. "spring-facial-guide". */
+  slug: string;
+  /** Short summary for cards/listings + meta description. */
+  excerpt: string;
+  /** Article body as Markdown. */
+  body: string;
+  /**
+   * Optional cover image. An already-uploaded media path or a `<CmsImage>` src.
+   * Never a "paste image URL" field.
+   */
+  coverImage?: string;
+  /** Alt text for the cover image (accessibility + SEO). */
+  coverImageAlt?: string;
+  /** Optional author display name. */
+  author?: string;
+  /** Optional category label. */
+  category?: string;
+  /** Optional SEO keywords. */
+  keywords?: string[];
+  /** ISO 8601 publish timestamp. Posts with a FUTURE value are unpublished. */
+  publishedAt: string;
+  /** ISO 8601 last-updated timestamp. */
+  updatedAt?: string;
+}

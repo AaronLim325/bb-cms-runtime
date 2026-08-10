@@ -13,6 +13,7 @@ export type {
   CollectionDescriptor,
   CollectionMap,
   WriteResult,
+  BlogPost,
 } from "./types.js";
 
 // Collection definition
@@ -33,6 +34,18 @@ export {
   type CmsRouteHandlers,
 } from "./route.js";
 export { invalidateCollection } from "./revalidate.js";
+
+// Blog capability: server-side append/upsert + external revalidate route + sitemap.
+export {
+  publishArticle,
+  createRevalidateRoute,
+  blogSitemapEntries,
+  type PublishArticleOptions,
+  type PublishArticleResult,
+  type RevalidateRouteOptions,
+  type RevalidateRouteHandlers,
+  type BlogSitemapEntry,
+} from "./blog.js";
 
 // Page cache-mode guard
 export {
