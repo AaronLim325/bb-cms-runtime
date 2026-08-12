@@ -10,6 +10,7 @@
  */
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { revalidatePath, revalidateTag } from "next/cache";
 import type { BlogPost, CollectionDescriptor, CollectionMap } from "./types.js";
 import { readCollectionRaw, writeCollectionRaw } from "./storage.js";
 import { invalidateCollection } from "./revalidate.js";
@@ -196,6 +197,147 @@ export function createRevalidateRoute(
     }
 
     return NextResponse.json({ ok: true, revalidated, unknown });
+  }
+
+  return { POST };
+}
+
+/** Options for {@link createBlogIngestRoute}. */
+export interface BlogIngestRouteOptions {
+  /**
+   * Shared secret the external caller (the BB OS content engine) must present as
+   * `Authorization: Bearer <secret>`. Defaults to `process.env.BLOG_REVALIDATE_SECRET`
+   * — the SAME env var the {@link createRevalidateRoute} purge endpoint uses, so a
+   * site wires ONE secret for both doors. When falsy the route fails CLOSED (500)
+   * so a missing env var can never leave the ingest endpoint open.
+   */
+  secret?: string;
+  /** Blog collection name (the `data/<collection>.json` document). Defaults to "blog". */
+  collection?: string;
+  /**
+   * Public list route that renders the blog index, revalidated after every
+   * ingest. Defaults to "/blog". The individual article path is derived as
+   * `<listPath>/<slug>`.
+   */
+  listPath?: string;
+  /** Cache tag purged after ingest. Defaults to the collection name (matches `defineCollection`'s tag default). */
+  tag?: string;
+}
+
+/** The Next 16 route-handler shape returned by {@link createBlogIngestRoute}. */
+export interface BlogIngestRouteHandlers {
+  POST: (req: NextRequest) => Promise<Response>;
+}
+
+/** Required fields on an ingest payload — everything else on {@link BlogPost} is optional. */
+const INGEST_REQUIRED_FIELDS = ["title", "slug", "body", "publishedAt"] as const;
+
+/**
+ * Build a `{ POST }` handler that lets an EXTERNAL system (the BB OS content
+ * engine) PUBLISH one article INTO this site — without the OS ever holding this
+ * site's Blob token. The OS POSTs the article JSON here; THIS site writes it into
+ * its OWN Vercel Blob (via {@link publishArticle}, using this site's own
+ * `BLOB_READ_WRITE_TOKEN` already in env) and revalidates the blog. This is the
+ * secure standard: no cross-site token sprawl (CW-061 Phase 2).
+ *
+ * Auth: `Authorization: Bearer <secret>` compared to `BLOG_REVALIDATE_SECRET`
+ * (the same secret the purge route already uses). Body: one article JSON
+ * (`{ title, slug, excerpt?, body, coverImage?, coverImageAlt?, category?,
+ * author?, publishedAt, updatedAt? }`). Cover images stay on THIS site's own
+ * Blob — the OS never sends a blob token.
+ */
+export function createBlogIngestRoute(
+  options: BlogIngestRouteOptions = {},
+): BlogIngestRouteHandlers {
+  const collection = options.collection ?? "blog";
+  const listPath = options.listPath ?? "/blog";
+  const tag = options.tag ?? collection;
+
+  async function POST(req: NextRequest): Promise<Response> {
+    const secret = options.secret ?? process.env.BLOG_REVALIDATE_SECRET;
+    if (!secret) {
+      console.error("[cms-runtime:blog-ingest] no secret configured — failing closed");
+      return NextResponse.json(
+        { ok: false, error: "Blog ingest route not configured" },
+        { status: 500 },
+      );
+    }
+
+    const auth = req.headers.get("authorization") ?? "";
+    const token = auth.replace(/^Bearer\s+/i, "").trim();
+    if (token !== secret) {
+      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+    }
+
+    let body: Record<string, unknown> | null;
+    try {
+      body = (await req.json()) as Record<string, unknown> | null;
+    } catch {
+      return NextResponse.json(
+        { ok: false, error: "Invalid JSON body" },
+        { status: 400 },
+      );
+    }
+    if (!body || typeof body !== "object") {
+      return NextResponse.json(
+        { ok: false, error: "Body must be a single article object" },
+        { status: 400 },
+      );
+    }
+
+    const missing = INGEST_REQUIRED_FIELDS.filter((f) => {
+      const v = body[f];
+      return typeof v !== "string" || v.trim() === "";
+    });
+    if (missing.length > 0) {
+      return NextResponse.json(
+        { ok: false, error: `Missing required field(s): ${missing.join(", ")}` },
+        { status: 400 },
+      );
+    }
+
+    // Build the canonical BlogPost. Only known fields are carried across so the
+    // OS can never inject arbitrary keys into this site's data document.
+    const post: BlogPost = {
+      title: (body.title as string).trim(),
+      slug: (body.slug as string).trim(),
+      excerpt: typeof body.excerpt === "string" ? body.excerpt : "",
+      body: body.body as string,
+      publishedAt: body.publishedAt as string,
+    };
+    if (typeof body.coverImage === "string") post.coverImage = body.coverImage;
+    if (typeof body.coverImageAlt === "string") post.coverImageAlt = body.coverImageAlt;
+    if (typeof body.author === "string") post.author = body.author;
+    if (typeof body.category === "string") post.category = body.category;
+    if (Array.isArray(body.keywords)) {
+      post.keywords = (body.keywords as unknown[]).filter(
+        (k): k is string => typeof k === "string",
+      );
+    }
+    if (typeof body.updatedAt === "string") post.updatedAt = body.updatedAt;
+
+    // Write into THIS site's own Blob (its own BLOB_READ_WRITE_TOKEN in env).
+    const result = await publishArticle(collection, post);
+    if (!result.ok) {
+      return NextResponse.json(
+        { ok: false, error: result.error ?? "Publish failed" },
+        { status: 500 },
+      );
+    }
+
+    // Revalidate the blog: purge the read tag + the list HTML + the article HTML
+    // (mirrors what createRevalidateRoute/invalidateCollection do, plus the
+    // [slug] page which is not in the collection's `consumers`). Failures here
+    // never fail the write — the Blob is already persisted.
+    try {
+      revalidateTag(tag, "max");
+      revalidatePath(listPath);
+      revalidatePath(`${listPath.replace(/\/+$/, "")}/${result.slug}`);
+    } catch (err) {
+      console.warn("[cms-runtime:blog-ingest] revalidation skipped", err);
+    }
+
+    return NextResponse.json({ ok: true, slug: result.slug }, { status: 200 });
   }
 
   return { POST };

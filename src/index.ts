@@ -39,11 +39,14 @@ export { invalidateCollection } from "./revalidate.js";
 export {
   publishArticle,
   createRevalidateRoute,
+  createBlogIngestRoute,
   blogSitemapEntries,
   type PublishArticleOptions,
   type PublishArticleResult,
   type RevalidateRouteOptions,
   type RevalidateRouteHandlers,
+  type BlogIngestRouteOptions,
+  type BlogIngestRouteHandlers,
   type BlogSitemapEntry,
 } from "./blog.js";
 
