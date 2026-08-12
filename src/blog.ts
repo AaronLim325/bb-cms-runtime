@@ -12,8 +12,94 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { revalidatePath, revalidateTag } from "next/cache";
 import type { BlogPost, CollectionDescriptor, CollectionMap } from "./types.js";
-import { readCollectionRaw, writeCollectionRaw } from "./storage.js";
+import { createHash } from "node:crypto";
+import { readCollectionRaw, writeCollectionRaw, putMedia } from "./storage.js";
 import { invalidateCollection } from "./revalidate.js";
+
+/** Vercel Blob's public host — a cover already on this host is site-owned. */
+const VERCEL_BLOB_HOST = "public.blob.vercel-storage.com";
+
+/** Map an image content-type to a file extension (default "bin" for unknown). */
+function extForContentType(contentType: string): string {
+  const ct = (contentType.split(";")[0] ?? "").trim().toLowerCase();
+  switch (ct) {
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    case "image/png":
+      return "png";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    case "image/avif":
+      return "avif";
+    case "image/svg+xml":
+      return "svg";
+    default:
+      return "bin";
+  }
+}
+
+/**
+ * Enforce BB's iron rule for blog covers: an article must never permanently
+ * render an EXTERNAL image URL (fragile + may fall outside the site's
+ * next.config image whitelist → 裂图). Given a cover URL:
+ *
+ * - falsy, a relative path ("/..."), or already on THIS site's own Vercel Blob
+ *   → returned unchanged (already local / site-owned).
+ * - otherwise EXTERNAL (Supabase Storage, any http/https host) → download the
+ *   bytes and re-host them on THIS site's own Blob via {@link putMedia}, then
+ *   return the resulting Blob URL. The pathname is content-addressed
+ *   (`media/blog-covers/<slug>-<hash>.<ext>`) so a re-ingest of the same bytes
+ *   is idempotent (overwrite-tolerant, never fails).
+ *
+ * ANY failure in the transfer (fetch not ok, network error, upload error) →
+ * logs and returns `undefined` (drop the cover). Better no cover than an
+ * external one — and the article text is the priority, so this never throws.
+ */
+export async function ensureLocalCover(
+  coverUrl: string | undefined,
+  slug: string,
+): Promise<string | undefined> {
+  if (!coverUrl) return coverUrl;
+  // Relative path or already on our own Blob → already site-owned, leave as-is.
+  if (coverUrl.startsWith("/")) return coverUrl;
+  if (coverUrl.includes(VERCEL_BLOB_HOST)) return coverUrl;
+
+  // External host → download bytes → re-upload through our own pipeline.
+  try {
+    const res = await fetch(coverUrl);
+    if (!res.ok) {
+      console.warn(
+        `[cms-runtime:ensureLocalCover] fetch ${res.status} for ${coverUrl} — dropping cover`,
+      );
+      return undefined;
+    }
+    const arrayBuffer = await res.arrayBuffer();
+    const contentType =
+      (res.headers.get("content-type")?.split(";")[0] ?? "").trim() ||
+      "image/jpeg";
+    const ext = extForContentType(contentType);
+    const hash = createHash("sha256")
+      .update(Buffer.from(arrayBuffer))
+      .digest("hex")
+      .slice(0, 10);
+    const pathname = `media/blog-covers/${slug}-${hash}.${ext}`;
+    // Content-addressed pathname → re-ingesting the same bytes is idempotent;
+    // allowOverwrite tolerates the re-write so a re-ingest never fails.
+    const { url } = await putMedia(pathname, arrayBuffer, contentType, {
+      allowOverwrite: true,
+    });
+    return url;
+  } catch (err) {
+    console.error(
+      `[cms-runtime:ensureLocalCover] transfer failed for ${coverUrl} — dropping cover`,
+      err,
+    );
+    return undefined;
+  }
+}
 
 /** Options for {@link publishArticle}. */
 export interface PublishArticleOptions {
@@ -315,6 +401,12 @@ export function createBlogIngestRoute(
       );
     }
     if (typeof body.updatedAt === "string") post.updatedAt = body.updatedAt;
+
+    // Iron rule: never persist an EXTERNAL cover URL. Download any external
+    // cover (e.g. an OS Supabase Storage URL) and re-host it on THIS site's own
+    // Blob before saving. Falsy/relative/already-on-our-Blob covers pass through
+    // unchanged; a failed transfer drops the cover (article text is priority).
+    post.coverImage = await ensureLocalCover(post.coverImage, post.slug);
 
     // Write into THIS site's own Blob (its own BLOB_READ_WRITE_TOKEN in env).
     const result = await publishArticle(collection, post);

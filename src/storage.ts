@@ -68,14 +68,27 @@ export async function mediaUsageBytes(): Promise<number> {
   return blobs.reduce((sum, b) => sum + (b.size ?? 0), 0);
 }
 
+/** Options for {@link putMedia}. */
+export interface PutMediaOptions {
+  /**
+   * When true, re-uploading the same pathname overwrites instead of throwing.
+   * Defaults to false (unchanged behavior) so accidental filename collisions in
+   * the admin upload path still fail loudly. Set true only for content-addressed
+   * pathnames (same bytes → same name) where a re-write is idempotent — e.g. the
+   * blog cover-transfer path, where a re-ingest of the same article must NOT fail.
+   */
+  allowOverwrite?: boolean;
+}
+
 export async function putMedia(
   pathname: string,
   body: Buffer | ArrayBuffer | Blob,
   contentType: string,
+  options: PutMediaOptions = {},
 ): Promise<{ url: string; pathname: string }> {
   const blob = await put(pathname, body as ArrayBuffer | Blob, {
     access: "public",
-    allowOverwrite: false,
+    allowOverwrite: options.allowOverwrite ?? false,
     contentType,
   });
   return { url: blob.url, pathname: blob.pathname };
