@@ -128,17 +128,111 @@ export interface PublishArticleResult {
   error?: string;
 }
 
+/** The envelope returned by {@link publishArticles} (the batch upsert). */
+export interface PublishArticlesResult {
+  ok: boolean;
+  /** The slugs upserted, in input order. Empty on a validation/write failure. */
+  slugs: string[];
+  /** Per-article upsert mode, parallel to {@link slugs}. */
+  results?: { slug: string; mode: "created" | "updated" }[];
+  error?: string;
+}
+
 function isBlogPostArray(v: unknown): v is BlogPost[] {
   return Array.isArray(v);
 }
 
 /**
- * Upsert one article into a blog collection by slug — the append fix.
+ * Upsert MANY articles into a blog collection by slug in ONE read-modify-write —
+ * the batch fix (CW-061). Reads `data/<collection>.json` ONCE, upserts every post
+ * by slug into the in-memory array, writes the whole array back ONCE, THEN
+ * invalidates ONCE (when a descriptor is supplied).
  *
- * Reads the current `data/<collection>.json` array (fallback `[]`), replaces the
- * post whose slug matches or appends when new, writes the whole array back via
- * the storage boundary, THEN invalidates (when a descriptor is supplied) so an
- * out-of-band write never serves stale HTML/data.
+ * This is the race-free replacement for calling {@link publishArticle} in a loop:
+ * N sequential single-article publishes each do their OWN read-modify-write, and
+ * Vercel Blob's list()-read lag between rapid writes lets a later write clobber an
+ * earlier one (2 delivered → only 1 survives). Doing the whole batch in one
+ * read-modify-write makes that structurally impossible.
+ *
+ * Validation mirrors {@link publishArticle}: every post needs a non-empty slug +
+ * title, else the WHOLE batch is rejected (nothing is written) with an error
+ * naming the offending slug.
+ */
+export async function publishArticles(
+  collectionName: string,
+  posts: BlogPost[],
+  opts: PublishArticleOptions = {},
+): Promise<PublishArticlesResult> {
+  if (!Array.isArray(posts) || posts.length === 0) {
+    return { ok: false, slugs: [], error: "No posts to publish" };
+  }
+
+  const now = (opts.now ?? (() => new Date()))().toISOString();
+  const normalizedList: BlogPost[] = [];
+  for (const post of posts) {
+    const slug = post.slug?.trim();
+    if (!slug) {
+      return { ok: false, slugs: [], error: "A post is missing a slug" };
+    }
+    if (!post.title?.trim()) {
+      return { ok: false, slugs: [], error: `Post "${slug}" is missing a title` };
+    }
+    normalizedList.push({
+      ...post,
+      slug,
+      publishedAt: post.publishedAt || now,
+      updatedAt: now,
+    });
+  }
+
+  try {
+    // ONE read for the whole batch.
+    const raw = await readCollectionRaw(collectionName);
+    const list: BlogPost[] = isBlogPostArray(raw) ? [...raw] : [];
+
+    const results: { slug: string; mode: "created" | "updated" }[] = [];
+    for (const normalized of normalizedList) {
+      const idx = list.findIndex((p) => p.slug === normalized.slug);
+      if (idx >= 0) {
+        list[idx] = normalized;
+        results.push({ slug: normalized.slug, mode: "updated" });
+      } else {
+        list.push(normalized);
+        results.push({ slug: normalized.slug, mode: "created" });
+      }
+    }
+
+    // ONE write for the whole batch.
+    await writeCollectionRaw(collectionName, list);
+
+    // ONE invalidation, exactly the way the data route's PUT does. Wrapped so a
+    // non-Next caller (standalone script) still returns ok after the write.
+    if (opts.descriptor) {
+      try {
+        invalidateCollection(opts.descriptor);
+      } catch (err) {
+        console.warn(
+          "[cms-runtime:publishArticles] invalidation skipped (no Next runtime?)",
+          err,
+        );
+      }
+    }
+
+    return { ok: true, slugs: results.map((r) => r.slug), results };
+  } catch (err) {
+    console.error("[cms-runtime:publishArticles]", collectionName, err);
+    return {
+      ok: false,
+      slugs: [],
+      error: err instanceof Error ? err.message : "Publish failed",
+    };
+  }
+}
+
+/**
+ * Upsert ONE article into a blog collection by slug — the append fix. Delegates
+ * to {@link publishArticles} so the single-article and batch paths share one
+ * read-modify-write implementation. Other callers still import this unchanged.
  */
 export async function publishArticle(
   collectionName: string,
@@ -153,52 +247,11 @@ export async function publishArticle(
     return { ok: false, slug, error: "Post is missing a title" };
   }
 
-  const now = (opts.now ?? (() => new Date()))().toISOString();
-  const normalized: BlogPost = {
-    ...post,
-    slug,
-    publishedAt: post.publishedAt || now,
-    updatedAt: now,
-  };
-
-  try {
-    const raw = await readCollectionRaw(collectionName);
-    const list: BlogPost[] = isBlogPostArray(raw) ? [...raw] : [];
-
-    const idx = list.findIndex((p) => p.slug === slug);
-    let mode: "created" | "updated";
-    if (idx >= 0) {
-      list[idx] = normalized;
-      mode = "updated";
-    } else {
-      list.push(normalized);
-      mode = "created";
-    }
-
-    await writeCollectionRaw(collectionName, list);
-
-    // Invalidate exactly the way the data route's PUT does. Wrapped so a
-    // non-Next caller (standalone script) still returns ok after the write.
-    if (opts.descriptor) {
-      try {
-        invalidateCollection(opts.descriptor);
-      } catch (err) {
-        console.warn(
-          "[cms-runtime:publishArticle] invalidation skipped (no Next runtime?)",
-          err,
-        );
-      }
-    }
-
-    return { ok: true, slug, mode };
-  } catch (err) {
-    console.error("[cms-runtime:publishArticle]", collectionName, err);
-    return {
-      ok: false,
-      slug,
-      error: err instanceof Error ? err.message : "Publish failed",
-    };
+  const res = await publishArticles(collectionName, [post], opts);
+  if (!res.ok) {
+    return { ok: false, slug, error: res.error };
   }
+  return { ok: true, slug, mode: res.results?.[0]?.mode };
 }
 
 /** Options for {@link createRevalidateRoute}. */
@@ -327,10 +380,21 @@ const INGEST_REQUIRED_FIELDS = ["title", "slug", "body", "publishedAt"] as const
  * secure standard: no cross-site token sprawl (CW-061 Phase 2).
  *
  * Auth: `Authorization: Bearer <secret>` compared to `BLOG_REVALIDATE_SECRET`
- * (the same secret the purge route already uses). Body: one article JSON
- * (`{ title, slug, excerpt?, body, coverImage?, coverImageAlt?, category?,
- * author?, publishedAt, updatedAt? }`). Cover images stay on THIS site's own
- * Blob — the OS never sends a blob token.
+ * (the same secret the purge route already uses). Cover images stay on THIS
+ * site's own Blob — the OS never sends a blob token.
+ *
+ * Body — accepts EITHER shape (CW-061 batch fix):
+ *   - a single article object `{ title, slug, excerpt?, body, coverImage?,
+ *     coverImageAlt?, category?, author?, publishedAt, updatedAt? }`
+ *     → response `{ ok: true, slug }` (backward-compatible), OR
+ *   - a batch: a bare array `[ {…}, {…} ]` OR `{ articles: [ {…}, {…} ] }`
+ *     → response `{ ok: true, slugs: [...] }`.
+ *
+ * The WHOLE batch is written in ONE read-modify-write (via
+ * {@link publishArticles}) so rapid sequential single-article POSTs can no
+ * longer clobber each other through Vercel Blob's list()-read lag. If ANY
+ * article in a batch is missing a required field the WHOLE request is rejected
+ * 400 (naming which), and nothing is written.
  */
 export function createBlogIngestRoute(
   options: BlogIngestRouteOptions = {},
@@ -355,61 +419,103 @@ export function createBlogIngestRoute(
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    let body: Record<string, unknown> | null;
+    let parsed: unknown;
     try {
-      body = (await req.json()) as Record<string, unknown> | null;
+      parsed = await req.json();
     } catch {
       return NextResponse.json(
         { ok: false, error: "Invalid JSON body" },
         { status: 400 },
       );
     }
-    if (!body || typeof body !== "object") {
+
+    // Normalize to an array of raw article objects. Accept a single object
+    // (legacy, → { slug } response), a bare array, or { articles: [...] }.
+    let rawArticles: unknown[];
+    let isSingle = false;
+    if (Array.isArray(parsed)) {
+      rawArticles = parsed;
+    } else if (
+      parsed &&
+      typeof parsed === "object" &&
+      Array.isArray((parsed as { articles?: unknown }).articles)
+    ) {
+      rawArticles = (parsed as { articles: unknown[] }).articles;
+    } else if (parsed && typeof parsed === "object") {
+      rawArticles = [parsed];
+      isSingle = true;
+    } else {
       return NextResponse.json(
-        { ok: false, error: "Body must be a single article object" },
+        { ok: false, error: "Body must be an article object, an array, or { articles: [...] }" },
         { status: 400 },
       );
     }
 
-    const missing = INGEST_REQUIRED_FIELDS.filter((f) => {
-      const v = body[f];
-      return typeof v !== "string" || v.trim() === "";
+    if (rawArticles.length === 0) {
+      return NextResponse.json(
+        { ok: false, error: "No articles provided" },
+        { status: 400 },
+      );
+    }
+
+    // Validate EVERY article up front. If any is missing a required field the
+    // WHOLE request is rejected (naming which) and nothing is written.
+    const problems: string[] = [];
+    rawArticles.forEach((item, i) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        problems.push(`article[${i}] is not an object`);
+        return;
+      }
+      const b = item as Record<string, unknown>;
+      const missing = INGEST_REQUIRED_FIELDS.filter((f) => {
+        const v = b[f];
+        return typeof v !== "string" || v.trim() === "";
+      });
+      if (missing.length > 0) {
+        const slug = typeof b.slug === "string" && b.slug.trim() ? b.slug.trim() : "?";
+        problems.push(`article[${i}] (slug=${slug}) missing: ${missing.join(", ")}`);
+      }
     });
-    if (missing.length > 0) {
+    if (problems.length > 0) {
       return NextResponse.json(
-        { ok: false, error: `Missing required field(s): ${missing.join(", ")}` },
+        { ok: false, error: `Missing required field(s): ${problems.join("; ")}` },
         { status: 400 },
       );
     }
 
-    // Build the canonical BlogPost. Only known fields are carried across so the
-    // OS can never inject arbitrary keys into this site's data document.
-    const post: BlogPost = {
-      title: (body.title as string).trim(),
-      slug: (body.slug as string).trim(),
-      excerpt: typeof body.excerpt === "string" ? body.excerpt : "",
-      body: body.body as string,
-      publishedAt: body.publishedAt as string,
-    };
-    if (typeof body.coverImage === "string") post.coverImage = body.coverImage;
-    if (typeof body.coverImageAlt === "string") post.coverImageAlt = body.coverImageAlt;
-    if (typeof body.author === "string") post.author = body.author;
-    if (typeof body.category === "string") post.category = body.category;
-    if (Array.isArray(body.keywords)) {
-      post.keywords = (body.keywords as unknown[]).filter(
-        (k): k is string => typeof k === "string",
-      );
+    // Build the canonical BlogPosts. Only known fields are carried across so the
+    // OS can never inject arbitrary keys into this site's data document. Each
+    // cover is re-hosted onto THIS site's own Blob (iron rule: never persist an
+    // EXTERNAL cover URL — falsy/relative/already-local pass through, a failed
+    // transfer drops the cover since article text is the priority).
+    const posts: BlogPost[] = [];
+    for (const item of rawArticles) {
+      const b = item as Record<string, unknown>;
+      const post: BlogPost = {
+        title: (b.title as string).trim(),
+        slug: (b.slug as string).trim(),
+        excerpt: typeof b.excerpt === "string" ? b.excerpt : "",
+        body: b.body as string,
+        publishedAt: b.publishedAt as string,
+      };
+      if (typeof b.coverImage === "string") post.coverImage = b.coverImage;
+      if (typeof b.coverImageAlt === "string") post.coverImageAlt = b.coverImageAlt;
+      if (typeof b.author === "string") post.author = b.author;
+      if (typeof b.category === "string") post.category = b.category;
+      if (Array.isArray(b.keywords)) {
+        post.keywords = (b.keywords as unknown[]).filter(
+          (k): k is string => typeof k === "string",
+        );
+      }
+      if (typeof b.updatedAt === "string") post.updatedAt = b.updatedAt;
+
+      post.coverImage = await ensureLocalCover(post.coverImage, post.slug);
+      posts.push(post);
     }
-    if (typeof body.updatedAt === "string") post.updatedAt = body.updatedAt;
 
-    // Iron rule: never persist an EXTERNAL cover URL. Download any external
-    // cover (e.g. an OS Supabase Storage URL) and re-host it on THIS site's own
-    // Blob before saving. Falsy/relative/already-on-our-Blob covers pass through
-    // unchanged; a failed transfer drops the cover (article text is priority).
-    post.coverImage = await ensureLocalCover(post.coverImage, post.slug);
-
-    // Write into THIS site's own Blob (its own BLOB_READ_WRITE_TOKEN in env).
-    const result = await publishArticle(collection, post);
+    // ONE read-modify-write for the WHOLE batch (CW-061): no per-article blob
+    // read/write, so rapid sequential deliveries can no longer clobber.
+    const result = await publishArticles(collection, posts);
     if (!result.ok) {
       return NextResponse.json(
         { ok: false, error: result.error ?? "Publish failed" },
@@ -417,19 +523,26 @@ export function createBlogIngestRoute(
       );
     }
 
-    // Revalidate the blog: purge the read tag + the list HTML + the article HTML
-    // (mirrors what createRevalidateRoute/invalidateCollection do, plus the
-    // [slug] page which is not in the collection's `consumers`). Failures here
+    // Revalidate the blog ONCE: purge the read tag + the list HTML + every
+    // article HTML (mirrors createRevalidateRoute/invalidateCollection, plus the
+    // [slug] pages which are not in the collection's `consumers`). Failures here
     // never fail the write — the Blob is already persisted.
     try {
       revalidateTag(tag, "max");
       revalidatePath(listPath);
-      revalidatePath(`${listPath.replace(/\/+$/, "")}/${result.slug}`);
+      const base = listPath.replace(/\/+$/, "");
+      for (const slug of result.slugs) {
+        revalidatePath(`${base}/${slug}`);
+      }
     } catch (err) {
       console.warn("[cms-runtime:blog-ingest] revalidation skipped", err);
     }
 
-    return NextResponse.json({ ok: true, slug: result.slug }, { status: 200 });
+    // Single-object body keeps the legacy { ok, slug } shape; a batch returns
+    // { ok, slugs }.
+    return isSingle
+      ? NextResponse.json({ ok: true, slug: result.slugs[0] }, { status: 200 })
+      : NextResponse.json({ ok: true, slugs: result.slugs }, { status: 200 });
   }
 
   return { POST };

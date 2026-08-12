@@ -38,11 +38,13 @@ export { invalidateCollection } from "./revalidate.js";
 // Blog capability: server-side append/upsert + external revalidate route + sitemap.
 export {
   publishArticle,
+  publishArticles,
   createRevalidateRoute,
   createBlogIngestRoute,
   blogSitemapEntries,
   type PublishArticleOptions,
   type PublishArticleResult,
+  type PublishArticlesResult,
   type RevalidateRouteOptions,
   type RevalidateRouteHandlers,
   type BlogIngestRouteOptions,
